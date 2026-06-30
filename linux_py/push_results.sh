@@ -63,9 +63,12 @@ run_git() {
 }
 
 ensure_ready() {
-    [[ -n "$REPO" ]] || die 'GITHUB_REPO is not set'
     command -v git >/dev/null 2>&1 || die "git not found"
     command -v realpath >/dev/null 2>&1 || die "realpath not found"
+    # Only require GITHUB_REPO when first-time clone (no existing worktree)
+    if [[ ! -d "$WORK_DIR/.git" && -z "$REPO" ]]; then
+        die 'GITHUB_REPO is required for first-time clone. Set GITHUB_REPO or run start.sh.'
+    fi
     for f in "${FILES[@]}"; do
         [[ -f "$f" ]] || die "result file not found: $f"
     done
