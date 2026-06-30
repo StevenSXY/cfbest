@@ -8,7 +8,7 @@ cd "$ROOT"
 
 require_result_files() {
     local file
-    for file in best_ips.txt full_ips.txt README.MD; do
+    for file in best_ips.txt full_ips.txt README.md; do
         if [[ ! -f "$ROOT/$file" ]]; then
             echo "Missing result file: $file. Choose 2 to regenerate results first." >&2
             exit 1
