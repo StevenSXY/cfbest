@@ -35,7 +35,7 @@ DEFAULT_TOP_PER_REGION = 10
 SPEED_DOMAIN = "speed.cloudflare.com"
 SPEED_PATH = "/__down"
 SPEED_BYTES = 2 * 1024 * 1024
-FAST_LABEL = "优选高速 "
+FAST_LABEL = ""
 
 
 if sys.platform == "win32":
@@ -68,6 +68,8 @@ class GitHubConfig:
     token_env: str
     timeout: float
     enabled: bool
+    http_proxy: str | None = None
+    https_proxy: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ class AppConfig:
     verbose: bool
     numbered_regions: bool
     github: GitHubConfig
+    regions: set[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,7 @@ def parse_args() -> AppConfig:
     parser.add_argument("--speed-workers", type=int, default=DEFAULT_SPEED_WORKERS, help="speed test concurrency")
     parser.add_argument("--min-speed", type=float, default=DEFAULT_MIN_SPEED_MBPS, help="minimum fast speed in Mbps")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_PER_REGION, help="latency candidates kept per region")
+    parser.add_argument("--regions", type=str, default=None, help="comma-separated region filter, e.g. JP,SG,TW")
     parser.add_argument("--verbose", action="store_true", help="print each successful test result")
     parser.add_argument(
         "--NO",
@@ -167,6 +171,8 @@ def parse_args() -> AppConfig:
         help="environment variable containing a GitHub token",
     )
     parser.add_argument("--github-timeout", type=float, default=180, help="git command timeout in seconds")
+    parser.add_argument("--git-http-proxy", default=None, help="HTTP proxy for git, e.g. http://127.0.0.1:7890")
+    parser.add_argument("--git-https-proxy", default=None, help="HTTPS proxy for git, e.g. http://127.0.0.1:7890")
     args = parser.parse_args()
 
     try:
@@ -187,6 +193,7 @@ def parse_args() -> AppConfig:
         top_per_region=args.top,
         verbose=args.verbose,
         numbered_regions=numbered_regions,
+        regions={r.strip().upper() for r in args.regions.split(",")} if args.regions else None,
         github=GitHubConfig(
             repo=args.github_repo,
             branch=args.github_branch,
@@ -196,6 +203,8 @@ def parse_args() -> AppConfig:
             token_env=args.github_token_env,
             timeout=args.github_timeout,
             enabled=bool(args.github_repo and not args.no_github_sync),
+            http_proxy=args.git_http_proxy,
+            https_proxy=args.git_https_proxy,
         ),
     )
 
@@ -316,11 +325,13 @@ async def run_tcp_tests(nodes: Sequence[Node], *, timeout: float, workers: int, 
     return results
 
 
-def select_candidates(results: Iterable[TcpResult], top_per_region: int) -> list[TcpResult]:
+def select_candidates(results: Iterable[TcpResult], top_per_region: int, target_regions: set[str] | None = None) -> list[TcpResult]:
     groups: dict[str, list[tuple[float, int, TcpResult]]] = defaultdict(list)
     limit = max(1, top_per_region)
 
     for index, result in enumerate(results):
+        if target_regions and result.node.region not in target_regions:
+            continue
         heap = groups[result.node.region]
         item = (-result.latency_ms, -index, result)
         if len(heap) < limit:
@@ -446,7 +457,8 @@ def write_results(path: Path, results: Iterable[SpeedResult], numbered_regions: 
             label = FAST_LABEL if result.is_fast else ""
             region_counts[result.node.region] += 1
             region = f"{result.node.region}_{region_counts[result.node.region]}" if numbered_regions else result.node.region
-            file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{result.latency_ms}ms]\n")
+            value = f"{result.speed_mbps}M" if result.is_fast else f"{result.latency_ms}ms"
+            file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{value}]\n")
 
 
 def filter_fast_results(results: Iterable[SpeedResult]) -> list[SpeedResult]:
@@ -568,6 +580,12 @@ class GitHubSync:
             raise RuntimeError("git command not found")
 
         command = [git]
+        if self.config.http_proxy:
+            command.extend(["-c", f"http.proxy={self.config.http_proxy}"])
+            command.extend(["-c", "http.sslVerify=false"])
+        if self.config.https_proxy:
+            command.extend(["-c", f"https.proxy={self.config.https_proxy}"])
+            command.extend(["-c", "https.sslVerify=false"])
         header = self._auth_header()
         if header:
             command.extend(["-c", f"http.https://github.com/.extraheader={header}"])
@@ -621,7 +639,7 @@ async def run(config: AppConfig) -> int:
         verbose=config.verbose,
     )
 
-    candidates = select_candidates(tcp_results, config.top_per_region)
+    candidates = select_candidates(tcp_results, config.top_per_region, config.regions)
     print(f"TCP reachable: {len(tcp_results)}; speed candidates: {len(candidates)}")
 
     if candidates:
@@ -641,6 +659,7 @@ async def run(config: AppConfig) -> int:
         speed_results = []
 
     best_results = filter_fast_results(speed_results)
+    best_results.sort(key=lambda r: -r.speed_mbps)
     write_results(config.full_output_file, speed_results, config.numbered_regions)
     write_results(config.best_output_file, best_results, config.numbered_regions)
     print_summary(config, len(nodes), len(tcp_results), len(speed_results), len(best_results))
