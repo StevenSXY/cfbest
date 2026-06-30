@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
+export GITHUB_REPO="${GITHUB_REPO:-https://github.com/StevenSXY/cfbest.git}"
+
 
 require_result_files() {
     local file
