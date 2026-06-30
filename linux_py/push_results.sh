@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="${GITHUB_REPO:-}"
-BRANCH="${GITHUB_BRANCH:-main}"
+BRANCH="${GITHUB_BRANCH:-results}"
 WORK_DIR="${GITHUB_WORKDIR:-.github-sync}"
 MESSAGE="${GITHUB_MESSAGE:-Update IP results and README}"
 FILES=("best_ips.txt" "full_ips.txt" "README.md")
