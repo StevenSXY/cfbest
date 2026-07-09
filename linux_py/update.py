@@ -32,11 +32,16 @@ DEFAULT_SPEED_WORKERS = 16
 DEFAULT_MIN_SPEED_MBPS = 10.0
 DEFAULT_TOP_PER_REGION = 10
 
+DEFAULT_SPEED_TIMEOUT = 6.0
+DEFAULT_SPEED_PROCESS_BUFFER = 8.0
+DEFAULT_SPEED_WORKERS = 16
+DEFAULT_MIN_SPEED_MBPS = 10.0
+DEFAULT_TOP_PER_REGION = 10
+
 SPEED_DOMAIN = "speed.cloudflare.com"
 SPEED_PATH = "/__down"
 SPEED_BYTES = 2 * 1024 * 1024
 FAST_LABEL = ""
-
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -363,6 +368,7 @@ def measure_speed_with_curl(node: Node, timeout: float, process_buffer: float) -
         "NUL" if sys.platform == "win32" else "/dev/null",
         "-w",
         "%{size_download} %{time_total}",
+        "--noproxy", "*",
         "--resolve",
         f"{SPEED_DOMAIN}:{node.port}:{node.ip}",
         "--connect-timeout",
@@ -642,7 +648,15 @@ async def run(config: AppConfig) -> int:
     candidates = select_candidates(tcp_results, config.top_per_region, config.regions)
     print(f"TCP reachable: {len(tcp_results)}; speed candidates: {len(candidates)}")
 
-    if candidates:
+    if not candidates:
+        speed_results = []
+    elif config.min_speed_mbps >= 999:
+        print("Speed test disabled by --min-speed 999; using TCP latency directly")
+        speed_results = [
+            SpeedResult(node=c.node, latency_ms=c.latency_ms, speed_mbps=0.0, is_fast=False)
+            for c in candidates
+        ]
+    else:
         print(
             "Stage 2/2: download speed test, "
             f"concurrency={config.speed_workers}, fast tag > {config.min_speed_mbps} Mbps"
@@ -655,8 +669,6 @@ async def run(config: AppConfig) -> int:
             min_speed=config.min_speed_mbps,
             verbose=config.verbose,
         )
-    else:
-        speed_results = []
 
     best_results = filter_fast_results(speed_results)
     best_results.sort(key=lambda r: -r.speed_mbps)
