@@ -1,305 +1,151 @@
-# ☁ Cloudflare IP 优选工具
+# Cloudflare IP 优选工具（个人分叉）
 
-> 自动测试 Cloudflare CDN 节点的 TCP 延迟与下载速度，筛选最优 IP 并可自动推送至 GitHub，供 EdgeTunnel 等工具订阅使用。
+> 本仓库是 [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools) 的个人分叉，用于在中国电信网络下自动优选 Cloudflare 边缘节点，结果推送至本仓库 `results` 分支，供 EdgeTunnel / Clash 类客户端订阅。
 
----
-## 我的预选订阅仓库
-
->https://github.com/HandsomeMJZ/cfip
-
----
-## ⚠️特别提醒!!!
-
-**请不要在运行期间使用tun模式代理!!!否则会严重消耗KV数值!!!**
-
-**请不要在运行期间使用tun模式代理!!!否则会严重消耗KV数值!!!**
-
-**请不要在运行期间使用tun模式代理!!!否则会严重消耗KV数值!!!**
-
----
-## 📋 目录
-
-- [功能特性](#功能特性)
-- [快速开始](#快速开始)
-- [命令行参数](#命令行参数)
-- [配置文件详解](#配置文件详解)
-- [输出文件说明](#输出文件说明)
-- [GitHub 自动推送](#github-自动推送)
-- [订阅使用方法](#订阅使用方法)
-- [常见问题](#常见问题)
+上游定位是「Windows 开箱即用工具」，本分叉的改造重心是 **Linux 常驻运行 + 对抗单次测速抖动**，代码与文档已按这个方向分叉。
 
 ---
 
-## ✨ 功能特性
+## 分叉状态
 
-- **TCP 延迟测试**：多线程并发探测节点连通性与延迟，支持 IPv4 / IPv6
-- **下载测速**：对延迟达标节点进行真实带宽测试（通过 `speed.cloudflare.com` 下载 2 MB）
-- **智能筛选**：每个区域取延迟最低的前 N 个节点参与测速，避免无效请求
-- **自动推送**：测速完成后可一键推送结果文件和 README 至 GitHub 仓库
-- **首次向导**：无配置文件时自动运行配置向导，开箱即用
+| 项 | 值 |
+| --- | --- |
+| 上游 | [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools) |
+| 分叉基点 | 2026-05-09（上游 `972a7ae8` / 本仓库 `89b1648`） |
+| 本分叉独有 | 12 个命令行参数、三阶段升级链路、历史节点池 |
+| 未同步的上游提交 | 2026-05-23 的 6 个提交：Cloudflare R2 上传（`update.py` / `push_results.sh` / `start.sh`）、`windows_c/main.c` 改造、README 重写 |
+| 未同步的上游参数 | `--show-latency`、`--show-mbps`（本分叉节点行只输出速度，见「输出格式」） |
 
----
-
-## 🚀 快速开始
-
-### 前置要求
-
-| 依赖       | 说明                                     |
-|----------|------------------------------------------|
-| `curl.exe` | 需在系统 PATH 中，用于下载 IP 列表和测速  |
-| `git.exe`  | 仅 GitHub 推送功能需要                   |
-| Windows 10+ | 需支持 ANSI 虚拟终端（默认已支持）      |
-
-### 第一次运行
-
-直接双击 `cf_updater.exe` 或在终端执行：
-
-```bat
-cf_updater.exe
-```
-
-程序会自动：
-
-1. 生成默认配置文件 `setting.config`
-2. 弹出配置向导，引导填写 GitHub 推送相关信息（可直接回车跳过）
-3. 下载 IP 列表 → TCP 延迟测试 → 下载测速 → 写入结果文件
+未同步 R2 的原因：本分叉走自建三阶段 wrapper，不使用上游 `push_results.sh`；R2 的增量价值仅是绕开 `raw.githubusercontent.com` 的 CDN 缓存，代价是额外维护 R2 桶与客户端订阅地址，暂不需要。
 
 ---
 
-## 🖥 命令行参数
+## 一、运行链路
 
-```
-cf_updater.exe [--config <路径>] [--setup] [--upload] [--no-upload] [--push-only] [--help]
-```
+实际入口是三阶段 wrapper `cfip-updater.sh`（不在本仓库，位于运行机 `~/.hermes/scripts/cfip-updater/`）：
 
-| 参数              | 说明                                           |
-|-----------------|----------------------------------------------|
-| `--config <路径>` | 指定配置文件路径，默认为 `setting.config`         |
-| `--setup`       | 强制重新运行配置向导（即使配置文件已存在）             |
-| `--upload`      | 本次运行**强制开启** GitHub 推送（忽略配置文件设置） |
-| `--no-upload`   | 本次运行**禁用** GitHub 推送（忽略配置文件设置）     |
-| `--push-only`   | 跳过测速，仅更新 README 并推送现有结果文件至 GitHub  |
-| `--help` / `-h` | 显示帮助信息                                    |
+1. **测速**：`update.py --no-github-sync ...`
+   只测速不推送。关键：`update.py` 内建推送，不加 `--no-github-sync` 会先把当次结果推上去，覆盖掉第 2 步的补位节点。
+2. **合并**：`merge-history.py`
+   历史节点池补位与驱逐，结果覆盖 `best_ips.txt`。
+3. **推送**：统一 `git push`（`best_ips.txt` + `full_ips.txt` + 生成的 README → `results` 分支）。
 
-**示例：**
+阶段 2.5 是**空榜保护**：`best_ips.txt` 行数 < 5 时跳过推送并 `exit 0`。这是 2026-09-09 的真实事故补丁 —— 当时出口链路断流，TCP 可达数从 17,000+ 跌到 687，测出空榜直接覆盖了 GitHub 上的好榜。
 
-```bat
-# 使用自定义配置文件运行
-cf_updater.exe --config my_config.config
+其他工程细节：
 
-# 强制推送到 GitHub
-cf_updater.exe --upload
+- 测速阶段强制直连（wrapper 内 `unset *_PROXY`），避免代理干扰 `--resolve` 直连测速
+- 推送阶段走代理：`-c http.proxy=... -c http.sslVerify=false`（修复 GnuTLS 握手失败）
+- 运行期间**必须关闭 TUN 模式**，否则测速流量经代理通道，会快速消耗机场额度
+- cron 调度：06:00–23:00 每小时一次（凌晨不跑，无更新）
 
-# 只推送，不重新测速
-cf_updater.exe --push-only
+生产调用参数：
+
+```bash
+python3 update.py --NO --top 10 --min-speed 12 --max-ports-per-ip 2 \
+  --regions "JP,SG,KR,TW" --no-github-sync
 ```
 
 ---
 
-## ⚙ 配置文件详解
+## 二、历史节点池
 
-配置文件为纯文本格式，每行一项，格式为 `key=value`，`#` 开头为注释行。
+**解决的问题**：优质节点（例如长期 17M+ 的那批）经常因单次 TCP 抖动滑出 per-region top10，当次订阅就丢了它。
 
-首次运行自动生成于程序同目录下的 `setting.config`，可用任意文本编辑器修改。
+三层保障：
 
----
+| 机制 | 触发条件 | 关键参数 |
+| --- | --- | --- |
+| 补位 | 当次榜单缺席 + 池中**实时实测** ≥ 15M + TCP 存活 | `MIN_HISTORY_SPEED=15.0` |
+| 健康驱逐 | 连续 3 轮池预检 TCP 失败（≈3 小时） | TCP 超时 1.5s，并发 50 |
+| 每日复测 | 每 24h 全池 2MB 测速，连续 3 次 < 12M 降级驱逐（≈3 天） | `DEGRADE_THRESHOLD=12.0` / `DEGRADE_MAX=3` |
 
-### 📥 输入源
+配套的保护与产能参数：
 
-| 配置项             | 默认值                              | 说明                                           |
-|------------------|-------------------------------------|------------------------------------------------|
-| `input_file`     | `ips.txt`                           | 本地 IP 列表文件路径                             |
-| `input_url`      | `https://zip.cm.edu.kg/all.txt`     | 远程 IP 列表下载地址                             |
-| `download_input` | `true`                              | 每次运行时是否自动下载最新 IP 列表（`true`/`false`） |
-| `download_timeout` | `30`                              | 下载超时时间（秒）                               |
+- 功勋容错：`MISS_BASE=3` / `MISS_PER_COUNT=2` / `MISS_MAX_CAP=8`（上榜次数越多容忍越久）
+- 池容量上限 `MAX_POOL_SIZE=120`，超出淘汰功勋最低且不在当次榜的节点
+- 网络故障保护：全池 TCP 存活率 < 30% 时跳过驱逐与 miss 累计；单轮降级比例 > 40% 熔断（`DEGRADE_MASS_RATIO`）
+- 比例类判据带最小样本量 `MIN_RATIO_SAMPLE=8`，样本不足只记录不判定
+- 驱逐档案 `eviction_history.json` 留档，节点重新入池时恢复历史功勋（`RESTORE_COUNT_CAP=16`），避免「驱逐 → 重新入池 → 功勋清零 → 再被驱逐」的 churn
 
-> IP 列表格式：每行一条，格式为 `IP:端口#地区名`，例如 `1.2.3.4:443#HKG`
-
----
-
-### 📤 输出文件
-
-| 配置项               | 默认值          | 说明                                   |
-|--------------------|-----------------|----------------------------------------|
-| `full_output_file` | `full_ips.txt`  | 所有测速完成的节点（包含普通速度节点）     |
-| `best_output_file` | `best_ips.txt`  | 仅高速节点（速度超过 `min_speed_mbps`）  |
+**一条被实测否证的方案，留档避免重复提出**：曾想用「池内 `last_speed_check ≤ 6h` 且速度 ≥15M」的历史标签兜底劣化期的薄榜。A/B 实测（10 个 1.5 小时前刚实测 15-17M 的节点，串行单节点复测）只有 4-6M —— 旧标签 1.5 小时即失真。榜薄但真，不做假标签换长度。
 
 ---
 
-### 📄 README 生成
+## 三、本地新增参数（上游没有）
 
-| 配置项               | 默认值                         | 说明                                        |
-|--------------------|-------------------------------|---------------------------------------------|
-| `update_readme`    | `true`                        | 测速完成后是否自动更新 README 文件              |
-| `readme_file`      | `README.MD`                   | README 文件路径                              |
-| `raw_base_url`     | *(仓库 raw 地址)*              | 订阅链接的 URL 前缀（自动从 github_repo 推导） |
-| `test_location`    | `中国四川联通`                  | 显示在 README 中的测试地点描述                 |
-| `update_frequency` | `每半小时自动更新`               | 显示在 README 中的更新频率描述                 |
+| 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `--regions` | 全部 | 地区过滤，如 `JP,SG,KR,TW`（排除 HK，电信线路到 HK 反而差） |
+| `--max-ports-per-ip` | 2 | 同 IP 保留的端口数上限。上游源约 10% 的 IP 提供 26% 的节点（同一 IP 开满 2053/2083/2087/2096/443/8443），低质端口会挤占候选名额并干扰排序 |
+| `--no-github-sync` | 关 | 禁用 `update.py` 内建推送，由 wrapper 统一推送 |
+| `--github-repo` / `--github-branch` / `--github-path` / `--github-workdir` / `--github-message` | — | 内建推送的目标仓库 / 分支 / 路径 / 工作目录 / 提交信息 |
+| `--github-token-env` | — | 存放 Token 的环境变量名（不从命令行明文传） |
+| `--github-timeout` | 180 | git 命令超时 |
+| `--git-http-proxy` / `--git-https-proxy` | — | 仅 git 走代理，测速仍直连 |
 
----
+其余参数（`--top` / `--min-speed` / `--tcp-timeout` / `--tcp-workers` / `--speed-*` / `--NO` / `--verbose` / `-i` / `-o` / `--best-output`）与上游一致，`--help` 可查默认值。
 
-### 🔌 TCP 延迟测试
-
-| 配置项              | 默认值   | 说明                                                 |
-|-------------------|----------|------------------------------------------------------|
-| `tcp_timeout_ms`  | `1500`   | 单个节点 TCP 连接超时（毫秒），超时即视为不可达            |
-| `tcp_workers`     | `500`    | TCP 测试并发线程数，上限 1000，值越大速度越快但 CPU 占用越高 |
-| `top_per_region`  | `10`     | 每个地区取延迟最低的前 N 个节点进入测速，过滤低质量节点      |
-| `max_nodes`       | `0`      | 最多读取的节点数，`0` 表示不限制（读取全部）              |
+`--max-ports-per-ip` 设 2 而非 1：避免误杀同 IP 双优端口（443 与 2083 同时 16M+ 的情况真实存在）。
 
 ---
 
-### ⚡ 下载测速
+## 四、输出与订阅
 
-| 配置项                      | 默认值  | 说明                                                     |
-|---------------------------|---------|----------------------------------------------------------|
-| `speed_timeout_sec`       | `6`     | 单次测速最大等待时间（秒）                                   |
-| `speed_process_buffer_sec` | `8`    | 测速进程的缓冲超时（秒），略大于 `speed_timeout_sec` 即可     |
-| `speed_workers`           | `16`    | 测速并发线程数，上限 128，建议不超过带宽允许的并发数             |
-| `min_speed_mbps`          | `10.00` | 高速节点的最低速度阈值（Mbps），低于此值不写入 `best_ips.txt` |
-| `fast_label`              | `优选高速` | 高速节点在输出文件中的标签前缀                              |
-| `verbose`                 | `false` | 是否打印每个节点的详细测速日志（`true`/`false`）              |
-| `NO`                     | `false`                   | 开启相同地区编号显示                                   |
+节点行格式：
 
----
-
-### ☁ GitHub 自动推送
-
-| 配置项                     | 默认值                    | 说明                                              |
-|--------------------------|---------------------------|---------------------------------------------------|
-| `github_upload_enabled`  | `false`                   | 是否启用 GitHub 自动推送                             |
-| `github_repo`            | *(你的仓库地址)*            | 仓库完整地址，例如 `https://github.com/user/repo.git` |
-| `github_branch`          | `main`                    | 推送的目标分支                                      |
-| `github_workdir`         | `.github-sync`            | 本地 git 工作目录（程序自动管理，无需手动创建）           |
-| `github_message`         | `更新 IP 结果和 README`    | git commit 的提交信息                               |
-| `github_token`           | *(空)*                    | GitHub Personal Access Token，可留空改用环境变量      |
-| `github_token_env`       | `GITHUB_TOKEN`            | 存放 Token 的环境变量名                              |
-| `github_full_path`       | `full_ips.txt`            | 推送到仓库中的完整结果文件路径                          |
-| `github_best_path`       | `best_ips.txt`            | 推送到仓库中的高速结果文件路径                          |
-| `github_include_readme`  | `true`                    | 推送时是否同步 README 文件                           |
-| `github_readme_path`     | `README.MD`               | 推送到仓库中的 README 文件路径                        |
-| `github_push_retries`    | `3`                       | 推送失败后的最大重试次数                               |
-| `github_retry_delay_sec` | `10`                      | 每次重试前的等待时间（秒）                             |
-| `git_timeout_sec`        | `180`                     | 单条 git 命令的超时时间（秒）                          |
-
----
-
-### 🌐 Git 代理
-
-如果你的网络需要代理才能访问 GitHub，可以单独为 git 命令配置代理，不影响系统全局设置。
-
-| 配置项              | 默认值 | 说明                                    |
-|-------------------|--------|------------------------------------------|
-| `git_http_proxy`  | *(空)* | HTTP 代理地址，例如 `http://127.0.0.1:7890` |
-| `git_https_proxy` | *(空)* | HTTPS 代理地址，例如 `http://127.0.0.1:7890` |
-
----
-
-## 📁 输出文件说明
-
-程序运行后会在同目录生成以下文件：
-
-```
-cf_updater.exe
-setting.config        ← 配置文件（自动生成）
-ips.txt               ← 下载的原始 IP 列表
-full_ips.txt          ← 所有测速完成的节点
-best_ips.txt          ← 高速节点（可直接用于订阅）
-README.MD             ← 自动更新的订阅说明文件
-.github-sync/         ← git 工作目录（推送用，自动管理）
+```text
+18.139.30.198:443#SG_1 [19.65M]
 ```
 
-输出文件每行格式：
+`IP:端口#地区_序号 [速度]`。上游新版会额外带延迟（`[45ms 28Mbps]`），本分叉暂未移植。
 
-```
-# 普通节点
-1.2.3.4:443#HKG [12.34ms]
+| 用途 | 地址 |
+| --- | --- |
+| 订阅（推荐） | `https://raw.githubusercontent.com/StevenSXY/cfbest/results/best_ips.txt` |
+| 全量（供二次筛选） | `https://raw.githubusercontent.com/StevenSXY/cfbest/results/full_ips.txt` |
 
-# 高速节点（速度超过阈值）
-1.2.3.4:443#HKG [优选高速12.34ms]
+订阅说明：
+
+- 客户端（Clash Verge 等）通过 proxy-provider 指向上面的 `best_ips.txt`，每小时自动生效
+- ⚠️ `raw.githubusercontent.com` 有 5 分钟以上的 CDN 缓存，query buster 也绕不过。**验证推送结果请走 GitHub API**：
+
+```bash
+curl -s "https://api.github.com/repos/StevenSXY/cfbest/contents/best_ips.txt?ref=results" \
+  | python3 -c "import json,base64,sys; print(len([l for l in base64.b64decode(json.load(sys.stdin)['content']).decode().splitlines() if l.strip()]),'节点')"
 ```
+
+- 榜单长度有明确日节律：白天 06–10 点稳定 20–56 节点；晚 21–23 点 100% 低于 20 节点（近 30 天 57 轮统计，中位 22 节点）。**晚高峰薄榜是常态，不是故障**。
+- 判定「是不是坏了」的顺序：先对日节律 → 再测榜内节点实际速度（薄榜 ≠ 不可用，曾出现全链路 5MB 直连仅 68KB/s 时榜内节点实测仍有 18.5M）
 
 ---
 
-## 🔗 GitHub 自动推送
+## 五、目录与文件
 
-### 配置 Token
+| 路径 | 说明 |
+| --- | --- |
+| `linux_py/update.py` | 测速主体（本仓库唯一在维护的代码） |
+| `linux_py/ips.txt` | 本地 IP 源，下载失败时的回退 |
+| `linux_py/best_ips.txt` | 优选结果（合并后的最终榜单） |
+| `linux_py/full_ips.txt` | 全部测速成功节点 |
+| `linux_py/start.sh` | 上游的单次运行脚本（本分叉由 wrapper 取代，保留原样） |
+| `linux_py/push_results.sh` | 上游的推送脚本（本分叉不用，保留原样，**无 R2 逻辑**） |
+| `windows_c/main.c` | 上游 Windows 版源码，本分叉不维护 |
+| `linux_py/update_md.py` | 上游的 README 生成脚本 |
 
-1. 前往 GitHub → Settings → Developer settings → **Personal access tokens**
-2. 生成一个具有 `repo` 权限的 Token
-3. 将 Token 填入 `setting.config` 的 `github_token` 字段，**或**设置为环境变量：
-
-```bat
-set GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx
-```
-
-### 推送流程
-
-程序会自动完成以下步骤：
-
-1. 若本地工作目录不存在，则 `git clone` 目标仓库
-2. 将 `full_ips.txt`、`best_ips.txt`（和 README）复制进工作目录
-3. `git add` → `git commit` → `git push`
-4. 推送失败时自动重试（次数由 `github_push_retries` 控制）
-5. 若文件内容无变化，自动跳过本次推送
-
-### 定时自动运行（Windows 任务计划程序）
-
-在任务计划程序中新建任务，触发器设为所需间隔，操作程序填写：
-
-```
-程序：C:\path\to\cf_updater.exe
-参数：--upload
-起始目录：C:\path\to\
-```
+运行机上另有三份不在本仓库的脚本（见「运行链路」）：`cfip-updater.sh`（wrapper）、`merge-history.py`（历史池）、`analyze-history-pool.py`（池运行分析，可 `--days N`）。
 
 ---
 
-## 📡 订阅使用方法
+## 六、注意事项
 
-### EdgeTunnel 订阅
-
-1. 打开 EdgeTunnel 后台管理页面
-2. 进入「优选订阅」→「创建」
-3. 订阅模式选择 **自定义**
-4. 在订阅接口 / API / URL 中填入：
-
-```
-https://raw.githubusercontent.com/<用户名>/<仓库名>/refs/heads/<分支>/best_ips.txt
-```
-
-5. 验证可用性 → 选择**追加 API** → 保存并重新订阅
-
-> 订阅链接会在每次程序运行并推送后自动更新，无需手动维护。
+- **运行测速期间不要开 TUN 模式代理**，否则会快速消耗机场/KV 额度
+- Token 只经环境变量（`.env`）注入，不写进代码、不写进配置文件、不提交到仓库
+- 结果仓库分支是 `results`，代码在 `main`，两者不要混推
+- 若推送报 `gnutls_handshake() failed`（exit 128）：测速与本地写结果都已成功，只是末段网络抖动，下一轮 cron 会重试，无需修复
 
 ---
 
-## ❓ 常见问题
+## License
 
-**Q：程序启动后颜色显示异常或出现乱码？**
-
-确保终端支持 ANSI 转义码。推荐使用 Windows Terminal 或 PowerShell 7+。
-旧版 cmd.exe 可能显示异常，但不影响功能。
-
-**Q：下载 IP 列表失败怎么办？**
-
-程序会自动回退到本地的 `ips.txt` 文件。确保该文件存在且格式正确（每行 `IP:端口#地区`）。
-
-**Q：测速结果为空？**
-
-可能原因：TCP 超时设置过短（`tcp_timeout_ms`），或当前网络到 Cloudflare 节点整体不通畅。
-尝试适当增大 `tcp_timeout_ms`，或检查 `min_speed_mbps` 是否设置过高。
-
-**Q：GitHub 推送失败，提示凭据错误？**
-
-确认 `github_token` 已正确填写，且 Token 具有 `repo` 写入权限，并且仓库地址格式正确（以 `.git` 结尾）。
-
-**Q：如何只针对特定地区测速？**
-
-修改 `input_url` 或本地 `ips.txt`，只保留目标地区的节点（地区标签在 `#` 后），然后将 `top_per_region` 适当调大。
-
----
-
-## 📄 License
-
-本项目仅供学习与个人使用。
+本项目仅供学习与个人使用。原始项目版权归 [HandsomeMJZ](https://github.com/HandsomeMJZ) 所有。
