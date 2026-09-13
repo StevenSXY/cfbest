@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 本地备份文件
+*.bak
+*.bak-*
+
+# wrapper 运行时生成的结果仓库克隆（内部是独立 git 仓库，指向 results 分支）
+linux_py/.github-sync/
