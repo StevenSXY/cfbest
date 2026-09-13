@@ -89,7 +89,6 @@ class AppConfig:
     speed_workers: int
     min_speed_mbps: float
     top_per_region: int
-    max_ports_per_ip: int
     verbose: bool
     numbered_regions: bool
     github: GitHubConfig
@@ -138,12 +137,6 @@ def parse_args() -> AppConfig:
     parser.add_argument("--speed-workers", type=int, default=DEFAULT_SPEED_WORKERS, help="speed test concurrency")
     parser.add_argument("--min-speed", type=float, default=DEFAULT_MIN_SPEED_MBPS, help="minimum fast speed in Mbps")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_PER_REGION, help="latency candidates kept per region")
-    parser.add_argument(
-        "--max-ports-per-ip",
-        type=int,
-        default=2,
-        help="max TCP candidates kept per IP (dedup multi-port redundancy, default 2)",
-    )
     parser.add_argument("--regions", type=str, default=None, help="comma-separated region filter, e.g. JP,SG,TW")
     parser.add_argument("--verbose", action="store_true", help="print each successful test result")
     parser.add_argument(
@@ -203,7 +196,6 @@ def parse_args() -> AppConfig:
         speed_workers=args.speed_workers,
         min_speed_mbps=args.min_speed,
         top_per_region=args.top,
-        max_ports_per_ip=args.max_ports_per_ip,
         verbose=args.verbose,
         numbered_regions=numbered_regions,
         regions={r.strip().upper() for r in args.regions.split(",")} if args.regions else None,
@@ -338,31 +330,13 @@ async def run_tcp_tests(nodes: Sequence[Node], *, timeout: float, workers: int, 
     return results
 
 
-def select_candidates(
-    results: Iterable[TcpResult],
-    top_per_region: int,
-    target_regions: set[str] | None = None,
-    max_ports_per_ip: int = 2,
-) -> list[TcpResult]:
+def select_candidates(results: Iterable[TcpResult], top_per_region: int, target_regions: set[str] | None = None) -> list[TcpResult]:
     groups: dict[str, list[tuple[float, int, TcpResult]]] = defaultdict(list)
     limit = max(1, top_per_region)
 
-    # 同 IP 多端口去重:每个 IP 最多保留延迟最低的前 max_ports_per_ip 个候选。
-    # 上游源里 ~10% IP 提供 26% 节点(同 IP 开满 2053/2083/2087/2096/443/8443),
-    # 其中低质量端口(如 8443=1M)会挤占候选名额并干扰 merge 补位。
-    # 注意:保留 N>1 而非 1,避免误杀同 IP 不同端口的合格节点(如 443 与 2083 双优)。
-    per_ip: dict[str, list[TcpResult]] = defaultdict(list)
-    for result in results:
+    for index, result in enumerate(results):
         if target_regions and result.node.region not in target_regions:
             continue
-        key = result.node.ip
-        lst = per_ip[key]
-        lst.append(result)
-        lst.sort(key=lambda r: r.latency_ms)
-        if len(lst) > max(max_ports_per_ip, 1):
-            lst.pop()
-
-    for index, result in enumerate(r for lst in per_ip.values() for r in lst):
         heap = groups[result.node.region]
         item = (-result.latency_ms, -index, result)
         if len(heap) < limit:
@@ -671,7 +645,7 @@ async def run(config: AppConfig) -> int:
         verbose=config.verbose,
     )
 
-    candidates = select_candidates(tcp_results, config.top_per_region, config.regions, config.max_ports_per_ip)
+    candidates = select_candidates(tcp_results, config.top_per_region, config.regions)
     print(f"TCP reachable: {len(tcp_results)}; speed candidates: {len(candidates)}")
 
     if not candidates:
