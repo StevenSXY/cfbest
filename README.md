@@ -1,148 +1,266 @@
-# Cloudflare IP 优选工具（个人分叉）
+# Cloudflare IP 优选（个人分叉）
 
-> 本仓库是 [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools) 的个人分叉，用于在中国电信网络下自动优选 Cloudflare 边缘节点，结果推送至本仓库 `results` 分支，供 EdgeTunnel / Clash 类客户端订阅。
+> 在中国电信网络下自动优选 Cloudflare 边缘节点，结果推送至本仓库 `results` 分支，供 Clash / Shadowrocket 等客户端通过 proxy-provider 订阅。
 
-上游定位是「Windows 开箱即用工具」，本分叉的改造重心是 **Linux 常驻运行 + 对抗单次测速抖动**，代码与文档已按这个方向分叉。
-
----
-
-## 分叉状态
-
-| 项 | 值 |
-| --- | --- |
-| 上游 | [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools) |
-| 分叉基点 | 2026-05-09（上游 `972a7ae8` / 本仓库 `89b1648`） |
-| 本分叉独有 | 12 个命令行参数、三阶段升级链路、历史节点池 |
-| 未同步的上游提交 | 2026-05-23 的 6 个提交：Cloudflare R2 上传（`update.py` / `push_results.sh` / `start.sh`）、`windows_c/main.c` 改造、README 重写 |
-| 未同步的上游参数 | `--show-latency`、`--show-mbps`（本分叉节点行只输出速度，见「输出格式」） |
-
-未同步 R2 的原因：本分叉走自建三阶段 wrapper，不使用上游 `push_results.sh`；R2 的增量价值仅是绕开 `raw.githubusercontent.com` 的 CDN 缓存，代价是额外维护 R2 桶与客户端订阅地址，暂不需要。
+上游是 [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools)，定位「Windows 开箱即用」。
+本分叉的改造重心是 **Linux 常驻运行 + 对抗单次测速抖动 + 让节点质量在客户端可见**。
 
 ---
 
-## 一、运行链路
+## 一、与上游的差异
 
-实际入口是三阶段 wrapper `cfip-updater.sh`（不在本仓库，位于运行机 `~/.hermes/scripts/cfip-updater/`）：
+| 维度 | 上游 | 本分叉 |
+|---|---|---|
+| 运行形态 | Windows 单次运行 | Linux cron 常驻，每天 3 轮 |
+| 测速采样 | 2MB / 6s 超时 | **10MB / 20s，同节点连测 2 次取中位数** |
+| 质量评估 | 无 | **CV（变异系数）→ 节点名打 ★/☆/⚠** |
+| 历史节点 | 无 | 历史池 + 补位 + 驱逐 + 功勋容错 |
+| 地区筛选 | 全部 | `--regions` 按需过滤（现用 JP,SG,KR,TW） |
+| 同 IP 多端口 | 不去重 | `--max-ports-per-ip` 限制候选名额 |
 
-1. **测速**：`update.py --no-github-sync ...`
-   只测速不推送。关键：`update.py` 内建推送，不加 `--no-github-sync` 会先把当次结果推上去，覆盖掉第 2 步的补位节点。
-2. **合并**：`merge-history.py`
-   历史节点池补位与驱逐，结果覆盖 `best_ips.txt`。
-3. **推送**：统一 `git push`（`best_ips.txt` + `full_ips.txt` + 生成的 README → `results` 分支）。
+---
 
-阶段 2.5 是**空榜保护**：`best_ips.txt` 行数 < 5 时跳过推送并 `exit 0`。这是 2026-09-09 的真实事故补丁 —— 当时出口链路断流，TCP 可达数从 17,000+ 跌到 687，测出空榜直接覆盖了 GitHub 上的好榜。
+## 二、运行链路
 
-其他工程细节：
+入口是三阶段 wrapper `cfip-updater.sh`（本仓库 `linux_py/cfip-updater.sh`）：
 
-- 测速阶段强制直连（wrapper 内 `unset *_PROXY`），避免代理干扰 `--resolve` 直连测速
-- 推送阶段走代理：`-c http.proxy=... -c http.sslVerify=false`（修复 GnuTLS 握手失败）
-- 运行期间**必须关闭 TUN 模式**，否则测速流量经代理通道，会快速消耗机场额度
-- cron 调度：06:00–23:00 每小时一次（凌晨不跑，无更新）
+```
+1. 测速   update.py --no-github-sync ...
+          只测不推。内建推送必须先关掉，否则当次结果会覆盖第 2 步的补位节点。
 
-生产调用参数：
+2. 合并   merge-history.py --best ... --pool ...
+          历史池补位 / 驱逐 / 复测，结果覆盖 best_ips.txt。
+
+2.5 保护 测速环境自检 + 空榜保护
+          基线带宽 < 40Mbps → 跳过推送（带宽被占用，测速不可信）
+          best_ips.txt < 8 行 → 跳过推送（保护 GitHub 上现有榜单）
+
+3. 推送   git push → results 分支（best_ips.txt + full_ips.txt + README）
+```
+
+生产参数：
 
 ```bash
 python3 update.py --NO --top 10 --min-speed 12 --max-ports-per-ip 2 \
   --regions "JP,SG,KR,TW" --no-github-sync
 ```
 
+调度：每天 `06:00` / `12:00` / `18:00`（cron `0 6,12,18 * * *`）。
+
+工程细节：
+
+- 测速阶段强制直连（wrapper 内 `unset *_PROXY`），避免代理干扰 `--resolve`
+- 推送阶段走代理（`-c http.proxy=... -c http.sslVerify=false`），修复 GnuTLS 握手失败
+- 运行期间 **必须关闭 TUN 模式**，否则测速流量经代理，会快速消耗机场额度
+
 ---
 
-## 二、历史节点池
+## 三、测速方法（本分叉核心改造）
 
-**解决的问题**：优质节点（例如长期 17M+ 的那批）经常因单次 TCP 抖动滑出 per-region top10，当次订阅就丢了它。
+### 3.1 为什么从 2MB 改成 10MB
 
-三层保障：
+200ms RTT 链路上，2MB 只够约 11 个往返，慢启动期占比过半，**系统性低估 2.9~3.7 倍**：
+
+| 节点 | 2MB 测得 | 10MB 测得 | 倍率 |
+|---|---|---|---|
+| 47.131.106.251 | 16.53M | **61.07M** | 3.69x |
+| 103.204.174.165 | 6.71M | **19.73M** | 2.94x |
+
+后果：`--min-speed 12` 在 2MB 口径下实际等于要求 35M+，绝大多数合格节点被误杀；
+历史池被「2MB 口径的假低分」反复清洗，越洗越烂。
+
+### 3.2 为什么同节点要连测 2 次
+
+同一批节点连测 3 轮的实测结果：
+
+| 节点 | R1 | R2 | R3 | CV |
+|---|---|---|---|---|
+| 123.111.169.70:8443 | 15.7 | 20.8 | **4.2** | 51.0% |
+| 18.141.208.166 | 29.7 | **55.7** | 34.5 | 28.2% |
+| 47.131.106.251 | 57.7 | 59.7 | 63.8 | **4.1%** |
+| 57.180.48.227 | 28.0 | 29.0 | 29.9 | **2.7%** |
+
+- CV 中位 **15.1%**，4/16 节点 CV > 25%，单节点三轮可差 **51%**
+- 9/49 候选的「达标判定」在三轮间翻转（如 `43.161.233.40` = 30.6 / 0 / 0）
+
+**单次速度数字不足以判断质量**，所以改为：
+
+```
+同一节点连测 2 次 → 取中位数作为速度 → 用全部样本算 CV
+```
+
+### 3.3 CV 计算的一个陷阱
+
+若只对「成功样本」算 CV，`[30.0, 0.0]`（一次成功一次超时）会得到 CV = 0，
+被误判为「极其稳定」。
+
+**必须按全部尝试次数算，且任意一次失败则 `cv = max(cv, 100.0)`。**
+
+---
+
+## 四、质量标记（客户端可见）
+
+节点名里直接带标记，Clash / Shadowrocket 列表里一眼可辨：
+
+| 标记 | 条件 | 含义 |
+|---|---|---|
+| **★** | CV < 10% 且速度 > 25M | 又快又稳，首选 |
+| **☆** | 速度 > 25M 但 CV ≥ 10% | 快但会抖 |
+| **⚠** | 有 miss / degrade 记录 | 曾掉线或降级 |
+| 无 | 12~25M 或无 CV 数据 | 普通可用 |
+
+示例：
+
+```text
+54.168.245.61:443#JP_1 [46.92M] ★
+47.131.106.251:443#SG_3 [56.69M] ☆
+83.147.14.62:8443#TW_4 [14.32M] ⚠
+```
+
+**为什么不用「连续 N 轮稳定」的数字**：`count` 字段是「累计上榜次数」，
+手动测试也会让它 +1，曾被误读成「连续 25 轮稳定」，实际是跨多天的累计值。
+
+中转站（`sneaken.ccwu.cc`）会原样保留 `#` 后的内容，含 ★ ☆ ⚠ 等非 ASCII 字符
+（URL 编码 `%E2%98%85` 等），已在客户端验证。
+
+---
+
+## 五、历史节点池
+
+**解决的问题**：优质节点因单次 TCP 抖动滑出 per-region top10，当次订阅就丢了它。
 
 | 机制 | 触发条件 | 关键参数 |
-| --- | --- | --- |
-| 补位 | 当次榜单缺席 + 池中**实时实测** ≥ 15M + TCP 存活 | `MIN_HISTORY_SPEED=15.0` |
-| 健康驱逐 | 连续 3 轮池预检 TCP 失败（≈3 小时） | TCP 超时 1.5s，并发 50 |
-| 每日复测 | 每 24h 全池 2MB 测速，连续 3 次 < 12M 降级驱逐（≈3 天） | `DEGRADE_THRESHOLD=12.0` / `DEGRADE_MAX=3` |
+|---|---|---|
+| 补位 | 当次缺席 + 池中**实时实测** ≥ 15M + TCP 存活 | `MIN_HISTORY_SPEED=15.0` |
+| 健康驱逐 | 连续 3 轮池预检 TCP 失败 | `TCP_TIMEOUT=3.5` / `TCP_WORKERS=50` |
+| 每日复测 | 每 24h 全池 10MB 测速，连续 3 次 < 12M 降级驱逐 | `DEGRADE_THRESHOLD=12.0` / `DEGRADE_MAX=3` |
+| 功勋容错 | 上榜次数越多容忍越久 | `MISS_BASE=3` / `MISS_PER_COUNT=2` / `MISS_MAX_CAP=8` |
+| 池容量 | 超 120 条淘汰功勋最低且不在当次榜的 | `MAX_POOL_SIZE=120` |
+| 重新入池功勋上限 | 防止整轮驱逐后被恢复 | `RESTORE_COUNT_CAP=6` |
 
-配套的保护与产能参数：
+保护机制：
 
-- 功勋容错：`MISS_BASE=3` / `MISS_PER_COUNT=2` / `MISS_MAX_CAP=8`（上榜次数越多容忍越久）
-- 池容量上限 `MAX_POOL_SIZE=120`，超出淘汰功勋最低且不在当次榜的节点
-- 网络故障保护：全池 TCP 存活率 < 30% 时跳过驱逐与 miss 累计；单轮降级比例 > 40% 熔断（`DEGRADE_MASS_RATIO`）
-- 比例类判据带最小样本量 `MIN_RATIO_SAMPLE=8`，样本不足只记录不判定
-- 驱逐档案 `eviction_history.json` 留档，节点重新入池时恢复历史功勋（`RESTORE_COUNT_CAP=16`），避免「驱逐 → 重新入池 → 功勋清零 → 再被驱逐」的 churn
+- 全池 TCP 存活率 < 30% → 判定网络故障期，跳过驱逐与 miss 累计
+- 单轮降级比例 > 40% → 链路级劣化，本轮不累计 degrade
+- 比例类判据带 `MIN_RATIO_SAMPLE=8`，样本不足只记录不判定
+- 链路降级期补位/兜底阈值自动下调至 `中位数 × 0.25`
 
-**一条被实测否证的方案，留档避免重复提出**：曾想用「池内 `last_speed_check ≤ 6h` 且速度 ≥15M」的历史标签兜底劣化期的薄榜。A/B 实测（10 个 1.5 小时前刚实测 15-17M 的节点，串行单节点复测）只有 4-6M —— 旧标签 1.5 小时即失真。榜薄但真，不做假标签换长度。
+`RESTORE_COUNT_CAP` 从 16 降到 6 的原因：16 会让重新入池的节点 miss 容错直接顶到上限 8 轮，
+等于「已被驱逐过的差节点」获得永久豁免 —— 实测 `123.111.169.70` 历史驱逐 3 次仍 `count=17`。
 
 ---
 
-## 三、本地新增参数（上游没有）
+## 六、本地新增参数
 
 | 参数 | 默认 | 作用 |
-| --- | --- | --- |
-| `--regions` | 全部 | 地区过滤，如 `JP,SG,KR,TW`（排除 HK，电信线路到 HK 反而差） |
-| `--max-ports-per-ip` | 2 | 同 IP 保留的端口数上限。上游源约 10% 的 IP 提供 26% 的节点（同一 IP 开满 2053/2083/2087/2096/443/8443），低质端口会挤占候选名额并干扰排序 |
-| `--no-github-sync` | 关 | 禁用 `update.py` 内建推送，由 wrapper 统一推送 |
-| `--github-repo` / `--github-branch` / `--github-path` / `--github-workdir` / `--github-message` | — | 内建推送的目标仓库 / 分支 / 路径 / 工作目录 / 提交信息 |
+|---|---|---|
+| `--regions` | 全部 | 地区过滤，如 `JP,SG,KR,TW` |
+| `--max-ports-per-ip` | 2 | 同 IP 保留的端口数上限。上游源约 10% 的 IP 提供 26% 的节点 |
+| `--speed-repeats` | **2** | **同节点重复测速次数，取中位数 + 算 CV。设 1 退回旧行为** |
+| `--no-github-sync` | 关 | 禁用内建推送，由 wrapper 统一推送 |
+| `--github-*` | — | 内建推送的目标仓库 / 分支 / 路径 / 超时 / 代理 |
 | `--github-token-env` | — | 存放 Token 的环境变量名（不从命令行明文传） |
-| `--github-timeout` | 180 | git 命令超时 |
-| `--git-http-proxy` / `--git-https-proxy` | — | 仅 git 走代理，测速仍直连 |
-
-其余参数（`--top` / `--min-speed` / `--tcp-timeout` / `--tcp-workers` / `--speed-*` / `--NO` / `--verbose` / `-i` / `-o` / `--best-output`）与上游一致，`--help` 可查默认值。
-
-`--max-ports-per-ip` 设 2 而非 1：避免误杀同 IP 双优端口（443 与 2083 同时 16M+ 的情况真实存在）。
 
 ---
 
-## 四、输出与订阅
+## 七、输出与订阅
 
 节点行格式：
 
 ```text
-18.139.30.198:443#SG_1 [19.65M]
+IP:端口#地区_序号 [速度] 标记
 ```
 
-`IP:端口#地区_序号 [速度]`。上游新版会额外带延迟（`[45ms 28Mbps]`），本分叉暂未移植。
-
 | 用途 | 地址 |
-| --- | --- |
+|---|---|
 | 订阅（推荐） | `https://raw.githubusercontent.com/StevenSXY/cfbest/results/best_ips.txt` |
 | 全量（供二次筛选） | `https://raw.githubusercontent.com/StevenSXY/cfbest/results/full_ips.txt` |
 
-订阅说明：
-
-- 客户端（Clash Verge 等）通过 proxy-provider 指向上面的 `best_ips.txt`，每小时自动生效
-- ⚠️ `raw.githubusercontent.com` 有 5 分钟以上的 CDN 缓存，query buster 也绕不过。**验证推送结果请走 GitHub API**：
+⚠️ `raw.githubusercontent.com` 有 5 分钟以上 CDN 缓存，query buster 也绕不过。
+**验证推送结果请走 GitHub API**：
 
 ```bash
 curl -s "https://api.github.com/repos/StevenSXY/cfbest/contents/best_ips.txt?ref=results" \
   | python3 -c "import json,base64,sys; print(len([l for l in base64.b64decode(json.load(sys.stdin)['content']).decode().splitlines() if l.strip()]),'节点')"
 ```
 
-- 榜单长度有明确日节律：白天 06–10 点稳定 20–56 节点；晚 21–23 点 100% 低于 20 节点（近 30 天 57 轮统计，中位 22 节点）。**晚高峰薄榜是常态，不是故障**。
-- 判定「是不是坏了」的顺序：先对日节律 → 再测榜内节点实际速度（薄榜 ≠ 不可用，曾出现全链路 5MB 直连仅 68KB/s 时榜内节点实测仍有 18.5M）
+`results` 分支由脚本自动生成，**不要手动编辑**。
 
 ---
 
-## 五、目录与文件
+## 八、目录结构
 
 | 路径 | 说明 |
-| --- | --- |
-| `linux_py/update.py` | 测速主体（本仓库唯一在维护的代码） |
-| `linux_py/ips.txt` | 本地 IP 源，下载失败时的回退 |
-| `linux_py/best_ips.txt` | 优选结果（合并后的最终榜单） |
-| `linux_py/full_ips.txt` | 全部测速成功节点 |
-| `linux_py/start.sh` | 上游的单次运行脚本（本分叉由 wrapper 取代，保留原样） |
-| `linux_py/push_results.sh` | 上游的推送脚本（本分叉不用，保留原样，**无 R2 逻辑**） |
+|---|---|
+| `linux_py/update.py` | 测速主体（TCP 筛选 + 10MB 双测 + CV） |
+| `linux_py/merge-history.py` | 历史池：补位 / 驱逐 / 复测 / 质量标记 |
+| `linux_py/cfip-updater.sh` | 三阶段 wrapper，cron 的实际入口 |
+| `linux_py/start.sh` | 上游单次运行脚本（本分叉由 wrapper 取代，保留原样） |
+| `linux_py/push_results.sh` | 上游推送脚本（本分叉不用，保留原样） |
+| `linux_py/update_md.py` | 上游 README 生成脚本（本分叉不用） |
 | `windows_c/main.c` | 上游 Windows 版源码，本分叉不维护 |
-| `linux_py/update_md.py` | 上游的 README 生成脚本 |
 
-运行机上另有三份不在本仓库的脚本（见「运行链路」）：`cfip-updater.sh`（wrapper）、`merge-history.py`（历史池）、`analyze-history-pool.py`（池运行分析，可 `--days N`）。
+**不入库的运行时文件**（见 `.gitignore`）：`ips.txt`、`best_ips.txt`、`full_ips.txt`、
+`history_pool.json`、`eviction_history.json`。
 
 ---
 
-## 六、注意事项
+## 九、踩坑记录
 
-- **运行测速期间不要开 TUN 模式代理**，否则会快速消耗机场/KV 额度
-- Token 只经环境变量（`.env`）注入，不写进代码、不写进配置文件、不提交到仓库
-- 结果仓库分支是 `results`，代码在 `main`，两者不要混推
-- 若推送报 `gnutls_handshake() failed`（exit 128）：测速与本地写结果都已成功，只是末段网络抖动，下一轮 cron 会重试，无需修复
+这些是实际踩过的坑，留档避免重复犯。
+
+### 9.1 空榜保护（2026-09-09 事故）
+
+出口链路断流时，TCP 可达数从 17000+ 跌到 687，测出空榜直接覆盖 GitHub 上的好榜。
+现在 `best_ips.txt < 8 行` 会跳过推送。
+
+### 9.2 旧速度标签 1.5 小时即失真
+
+曾想用「池内 `last_speed_check ≤ 6h` 且 ≥15M」的历史标签兜底劣化期的薄榜。
+A/B 实测（10 个 1.5 小时前刚测出 15-17M 的节点，串行单测）只有 4-6M。
+
+**榜薄但真，不做假标签换长度。**
+
+### 9.3 1KB HTTP 探活预筛无效（2026-11-25 否证）
+
+动机：49 个候选里 25 个（51%）3 轮 10MB 全 0，想用廉价探活提前筛掉。
+
+实测：**召回率 100%，精确率仅 12%** —— 25 个废节点里 22 个能用 1KB 探活通过
+（`3.112.67.101` 1KB/0.40s 通过，10MB 三轮全 0）。
+
+根因：这类节点能完成 TCP+TLS 握手并返回小响应，一传大流量就卡死。
+**1KB 采样窗口完全不涉及带宽瓶颈**，与「2MB 被慢启动低估」同族错误。
+
+### 9.4 抽样必须按 TCP 延迟排名，不能随机抽
+
+同一批 SG 节点：随机抽 20 个 → 5% 达标；按延迟排名取第 11-40 位 → 24%。
+随机抽样把「TCP 延迟排序确有筛选作用」这个信号抹掉了。
+
+### 9.5 并发测速不能用于删除判定
+
+8 路并发跑 10MB 时，多个本该 20-35M 的节点被测成 0.00M。
+**任何「删节点」决策必须串行单测复验**；并发结果只能用于「留下」不能用于「剔除」。
+
+### 9.6 0.00M ≠ TCP 死
+
+清池时 28 条被判极慢，但并发阶段「TCP 不通」计数为 0 ——
+它们能握手，HTTPS 一传数据就卡死（22s 只下 15-170KB）。
+客户端表现为「连上了但用不了」，比干脆连不上更难受。
+
+### 9.7 gnutls_handshake() failed
+
+推送报 exit 128 但测速和本地写结果都已成功，只是末段网络抖动，下一轮 cron 会重试。
+已在 wrapper 内加 `-c http.sslVerify=false` 缓解。
+
+### 9.8 晚高峰薄榜是常态
+
+近 30 天 57 轮统计：白天 06-10 点稳定 20-56 节点；晚 21-23 点 100% 低于 20 节点，中位 22。
+**薄榜 ≠ 故障**，判定顺序：先对日节律 → 再实测榜内节点速度。
+
+### 9.9 18:00 会触发链路降级保护
+
+晚高峰起点，复测健康比例常低于 30%，系统自动把补位阈值从 12M 降到约 2M，
+导致榜单尾部混入 7-10M 的节点。**看速度数字自行避开**，不要选 12M 以下的。
 
 ---
 
