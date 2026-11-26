@@ -26,13 +26,10 @@ DEFAULT_FULL_OUTPUT_FILE = Path("full_ips.txt")
 DEFAULT_TCP_TIMEOUT = 1.5
 DEFAULT_TCP_WORKERS = 500
 
-DEFAULT_SPEED_TIMEOUT = 6.0
-DEFAULT_SPEED_PROCESS_BUFFER = 8.0
-DEFAULT_SPEED_WORKERS = 16
 DEFAULT_MIN_SPEED_MBPS = 10.0
 DEFAULT_TOP_PER_REGION = 10
 
-DEFAULT_SPEED_TIMEOUT = 6.0
+DEFAULT_SPEED_TIMEOUT = 20.0
 DEFAULT_SPEED_PROCESS_BUFFER = 8.0
 DEFAULT_SPEED_WORKERS = 16
 DEFAULT_MIN_SPEED_MBPS = 10.0
@@ -40,7 +37,9 @@ DEFAULT_TOP_PER_REGION = 10
 
 SPEED_DOMAIN = "speed.cloudflare.com"
 SPEED_PATH = "/__down"
-SPEED_BYTES = 2 * 1024 * 1024
+# 10MB: RTT 200ms 链路上 2MB 仅约 11 个往返, 慢启动期占比过半, 实测低估 2.9~3.7 倍
+# (47.131.106.251: 2MB=16.53M vs 10MB=61.07M; 103.204.174.165: 6.71M vs 19.73M)
+SPEED_BYTES = 10 * 1024 * 1024
 FAST_LABEL = ""
 
 if sys.platform == "win32":
@@ -87,6 +86,7 @@ class AppConfig:
     speed_timeout: float
     speed_process_buffer: float
     speed_workers: int
+    speed_repeats: int
     min_speed_mbps: float
     top_per_region: int
     max_ports_per_ip: int
@@ -119,6 +119,9 @@ class SpeedResult:
     latency_ms: float
     speed_mbps: float
     is_fast: bool
+    cv_pct: float = 0.0          # 变异系数(%): 同一节点多次测速的离散度, 越小越稳
+    samples: int = 1             # 有效样本数
+    speed_min: float = 0.0       # 多次测速中的最小值
 
 
 def parse_args() -> AppConfig:
@@ -136,6 +139,12 @@ def parse_args() -> AppConfig:
         help="extra seconds before killing a stuck curl process",
     )
     parser.add_argument("--speed-workers", type=int, default=DEFAULT_SPEED_WORKERS, help="speed test concurrency")
+    parser.add_argument(
+        "--speed-repeats",
+        type=int,
+        default=2,
+        help="每节点重复测速次数(取中位数+算 CV)。2=双测(2026-11-26 起默认), 1=旧行为",
+    )
     parser.add_argument("--min-speed", type=float, default=DEFAULT_MIN_SPEED_MBPS, help="minimum fast speed in Mbps")
     parser.add_argument("--top", type=int, default=DEFAULT_TOP_PER_REGION, help="latency candidates kept per region")
     parser.add_argument(
@@ -201,6 +210,7 @@ def parse_args() -> AppConfig:
         speed_timeout=args.speed_timeout,
         speed_process_buffer=args.speed_process_buffer,
         speed_workers=args.speed_workers,
+        speed_repeats=max(1, args.speed_repeats),
         min_speed_mbps=args.min_speed,
         top_per_region=args.top,
         max_ports_per_ip=args.max_ports_per_ip,
@@ -441,6 +451,7 @@ async def run_speed_tests(
     workers: int,
     min_speed: float,
     verbose: bool,
+    repeats: int = 1,
 ) -> list[SpeedResult]:
     queue: asyncio.Queue[TcpResult | None] = asyncio.Queue()
     results: list[SpeedResult] = []
@@ -452,17 +463,54 @@ async def run_speed_tests(
             try:
                 if candidate is None:
                     return
-                speed = await asyncio.to_thread(measure_speed_with_curl, candidate.node, timeout, process_buffer)
+                # 同一节点连测 repeats 次: 取中位数作为代表值, 用样本离散度算 CV。
+                # 2026-11-26 实测: 单次测量 CV 中位 15%, 4/16 节点 CV>25%,
+                # 同一节点三轮可差 51% —— 单次数字不足以判断质量。
+                raw_samples: list[float] = []
+                for _ in range(max(1, repeats)):
+                    s = await asyncio.to_thread(
+                        measure_speed_with_curl, candidate.node, timeout, process_buffer
+                    )
+                    raw_samples.append(s)
+                # ⚠️ CV 必须按「总尝试次数」算, 不能只按成功样本算:
+                # [30.0, 0.0] = 一次成功一次超时, 是极不稳定; 若只取成功样本会得到 CV=0
+                # 被误判为「极其稳定」(2026-11-26 单测发现)。
+                valid = sorted(v for v in raw_samples if v > 0)
+                if valid:
+                    mid = len(valid) // 2
+                    speed = (valid[mid] if len(valid) % 2 == 1
+                             else (valid[mid - 1] + valid[mid]) / 2)
+                    mean_all = sum(raw_samples) / len(raw_samples)
+                    if mean_all > 0 and len(raw_samples) >= 2:
+                        var = sum((v - mean_all) ** 2 for v in raw_samples) / len(raw_samples)
+                        cv = (var ** 0.5) / mean_all * 100
+                    else:
+                        cv = 0.0
+                    smin = valid[0]
+                else:
+                    speed, cv, smin = 0.0, 0.0, 0.0
+
+                # 只要有任一次失败, 就是「不稳定」信号, CV 至少 100%
+                failed_times = sum(1 for v in raw_samples if v <= 0)
+                if failed_times and valid:
+                    cv = max(cv, 100.0)
+
                 result = SpeedResult(
                     node=candidate.node,
                     latency_ms=candidate.latency_ms,
                     speed_mbps=speed,
                     is_fast=speed > min_speed,
+                    cv_pct=round(cv, 1),
+                    samples=len(valid),
+                    speed_min=round(smin, 2),
                 )
                 results.append(result)
                 if verbose:
                     status = "FAST" if result.is_fast else "NORMAL"
-                    tqdm.write(f"[SPEED] {candidate.node.raw} -> {speed} Mbps {status}")
+                    tqdm.write(
+                        f"[SPEED] {candidate.node.raw} -> {speed} Mbps "
+                        f"(raw={raw_samples}, cv={cv:.1f}%) {status}"
+                    )
                 progress.update(1)
             finally:
                 queue.task_done()
@@ -489,8 +537,15 @@ def write_results(path: Path, results: Iterable[SpeedResult], numbered_regions: 
             label = FAST_LABEL if result.is_fast else ""
             region_counts[result.node.region] += 1
             region = f"{result.node.region}_{region_counts[result.node.region]}" if numbered_regions else result.node.region
-            value = f"{result.speed_mbps}M" if result.is_fast else f"{result.latency_ms}ms"
-            file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{value}]\n")
+            if result.is_fast:
+                value = f"{result.speed_mbps}M"
+                # 把离散度附在方括号内: `[55.26M cv4.1]`。merge-history 用正则读回,
+                # 据此在最终节点名上打 ★/☆ 质量标记 (2026-11-26)。
+                extra = f" cv{result.cv_pct:g}" if result.samples >= 2 else ""
+                file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{value}{extra}]\n")
+            else:
+                value = f"{result.latency_ms}ms"
+                file.write(f"{result.node.ip}:{result.node.port}#{region} [{label}{value}]\n")
 
 
 def filter_fast_results(results: Iterable[SpeedResult]) -> list[SpeedResult]:
@@ -694,6 +749,7 @@ async def run(config: AppConfig) -> int:
             workers=config.speed_workers,
             min_speed=config.min_speed_mbps,
             verbose=config.verbose,
+            repeats=config.speed_repeats,
         )
 
     best_results = filter_fast_results(speed_results)

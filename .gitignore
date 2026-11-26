@@ -8,3 +8,13 @@ __pycache__/
 
 # wrapper 运行时生成的结果仓库克隆（内部是独立 git 仓库，指向 results 分支）
 linux_py/.github-sync/
+
+# ── cfip 工作产物与敏感数据 (2026-11-26) ──
+# 池数据: 含节点 IP + 实测速度历史, 是本机核心资产, 不进任何分支
+history_pool.json
+history_pool.json.bak-*
+eviction_history.json
+# 上游原始列表与测速中间产物 (可从上游重新拉取)
+linux_py/ips.txt
+linux_py/best_ips.txt
+linux_py/full_ips.txt
