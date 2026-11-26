@@ -1,22 +1,27 @@
-# Cloudflare IP 优选（个人分叉）
+# Cloudflare IP 优选
 
-> 在中国电信网络下自动优选 Cloudflare 边缘节点，结果推送至本仓库 `results` 分支，供 Clash / Shadowrocket 等客户端通过 proxy-provider 订阅。
+> 自动优选 Cloudflare 边缘节点，在中国电信网络下长期运行。结果通过 `results` 分支供 Clash / Shadowrocket 等客户端以 proxy-provider 方式订阅。
 
-上游是 [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools)，定位「Windows 开箱即用」。
-本分叉的改造重心是 **Linux 常驻运行 + 对抗单次测速抖动 + 让节点质量在客户端可见**。
+三条核心设计：
+
+- **10MB 双测** —— 同节点连测 2 次，取中位数，用 CV（变异系数）衡量稳定性
+- **质量标记** —— 节点名直接带 ★ / ☆ / ⚠，客户端列表里一眼可辨
+- **历史池** —— 优质节点不会因单次 TCP 抖动而丢失
 
 ---
 
-## 一、与上游的差异
+## 一、设计取舍
 
-| 维度 | 上游 | 本分叉 |
+| 维度 | 常规做法 | 本项目 |
 |---|---|---|
-| 运行形态 | Windows 单次运行 | Linux cron 常驻，每天 3 轮 |
+| 运行形态 | 单次运行 | Linux cron 常驻，每天 3 轮 |
 | 测速采样 | 2MB / 6s 超时 | **10MB / 20s，同节点连测 2 次取中位数** |
-| 质量评估 | 无 | **CV（变异系数）→ 节点名打 ★/☆/⚠** |
-| 历史节点 | 无 | 历史池 + 补位 + 驱逐 + 功勋容错 |
-| 地区筛选 | 全部 | `--regions` 按需过滤（现用 JP,SG,KR,TW） |
+| 质量评估 | 只看速度数字 | **CV → 节点名打 ★/☆/⚠** |
+| 历史节点 | 每轮从零开始 | 历史池 + 补位 + 驱逐 + 功勋容错 |
+| 地区筛选 | 全部地区 | `--regions` 按需过滤（现用 JP,SG,KR,TW） |
 | 同 IP 多端口 | 不去重 | `--max-ports-per-ip` 限制候选名额 |
+
+每条取舍的理由见下文对应章节。
 
 ---
 
@@ -55,7 +60,7 @@ python3 update.py --NO --top 10 --min-speed 12 --max-ports-per-ip 2 \
 
 ---
 
-## 三、测速方法（本分叉核心改造）
+## 三、测速方法
 
 ### 3.1 为什么从 2MB 改成 10MB
 
@@ -155,7 +160,7 @@ python3 update.py --NO --top 10 --min-speed 12 --max-ports-per-ip 2 \
 | 参数 | 默认 | 作用 |
 |---|---|---|
 | `--regions` | 全部 | 地区过滤，如 `JP,SG,KR,TW` |
-| `--max-ports-per-ip` | 2 | 同 IP 保留的端口数上限。上游源约 10% 的 IP 提供 26% 的节点 |
+| `--max-ports-per-ip` | 2 | 同 IP 保留的端口数上限。上游节点源里约 10% 的 IP 提供 26% 的节点 |
 | `--speed-repeats` | **2** | **同节点重复测速次数，取中位数 + 算 CV。设 1 退回旧行为** |
 | `--no-github-sync` | 关 | 禁用内建推送，由 wrapper 统一推送 |
 | `--github-*` | — | 内建推送的目标仓库 / 分支 / 路径 / 超时 / 代理 |
@@ -195,10 +200,10 @@ curl -s "https://api.github.com/repos/StevenSXY/cfbest/contents/best_ips.txt?ref
 | `linux_py/update.py` | 测速主体（TCP 筛选 + 10MB 双测 + CV） |
 | `linux_py/merge-history.py` | 历史池：补位 / 驱逐 / 复测 / 质量标记 |
 | `linux_py/cfip-updater.sh` | 三阶段 wrapper，cron 的实际入口 |
-| `linux_py/start.sh` | 上游单次运行脚本（本分叉由 wrapper 取代，保留原样） |
-| `linux_py/push_results.sh` | 上游推送脚本（本分叉不用，保留原样） |
-| `linux_py/update_md.py` | 上游 README 生成脚本（本分叉不用） |
-| `windows_c/main.c` | 上游 Windows 版源码，本分叉不维护 |
+| `linux_py/start.sh` | 早期单次运行脚本（已由 wrapper 取代，保留备查） |
+| `linux_py/push_results.sh` | 早期推送脚本（已由 wrapper 统一推送取代） |
+| `linux_py/update_md.py` | 早期 README 生成脚本（已不用） |
+| `windows_c/main.c` | Windows 版源码（不维护） |
 
 **不入库的运行时文件**（见 `.gitignore`）：`ips.txt`、`best_ips.txt`、`full_ips.txt`、
 `history_pool.json`、`eviction_history.json`。
@@ -266,4 +271,7 @@ A/B 实测（10 个 1.5 小时前刚测出 15-17M 的节点，串行单测）只
 
 ## License
 
-本项目仅供学习与个人使用。原始项目版权归 [HandsomeMJZ](https://github.com/HandsomeMJZ) 所有。
+本项目仅供学习与个人使用。
+
+早期版本基于 [HandsomeMJZ/cfip-tools](https://github.com/HandsomeMJZ/cfip-tools)（截至 2026-05-09 的 `89b1648`），
+其原始版权归原作者所有。测速方法、调度链路与历史池机制已完全重写。
