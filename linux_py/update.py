@@ -538,7 +538,9 @@ def write_results(path: Path, results: Iterable[SpeedResult], numbered_regions: 
             region_counts[result.node.region] += 1
             region = f"{result.node.region}_{region_counts[result.node.region]}" if numbered_regions else result.node.region
             if result.is_fast:
-                value = f"{result.speed_mbps}M"
+                # speed_mbps 可能是 [19.775] 或浮点累加的 [16.509999999999998],
+                # 统一格式化为两位小数, 避免 full_ips.txt 出现长尾小数。
+                value = f"{result.speed_mbps:.2f}M"
                 # 把离散度附在方括号内: `[55.26M cv4.1]`。merge-history 用正则读回,
                 # 据此在最终节点名上打 ★/☆ 质量标记 (2026-11-26)。
                 extra = f" cv{result.cv_pct:g}" if result.samples >= 2 else ""
